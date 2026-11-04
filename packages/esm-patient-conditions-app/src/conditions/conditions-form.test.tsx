@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 import React from 'react';
-import { vi, describe, it, expect } from 'vitest';
+import { vi, describe, it, expect, beforeEach } from 'vitest';
 import dayjs from 'dayjs';
 import userEvent from '@testing-library/user-event';
 import { render, screen, waitFor } from '@testing-library/react';
@@ -8,7 +8,7 @@ import { useTranslation } from 'react-i18next';
 import { type FetchResponse, openmrsFetch, showSnackbar, useLayoutType } from '@openmrs/esm-framework';
 import { mockFhirConditionsResponse, searchedCondition } from '__mocks__';
 import { getByTextWithMarkup, mockPatient } from 'tools';
-import { createCondition, useConditions, useConditionsSearch } from './conditions.resource';
+import { createCondition, updateCondition, useConditions, useConditionsSearch } from './conditions.resource';
 import ConditionsForm, { type ConditionFormProps } from './conditions-form.workspace';
 import { type PatientWorkspace2DefinitionProps } from '@openmrs/esm-patient-common-lib';
 
@@ -47,6 +47,7 @@ function renderConditionsForm(workspaceProps?: ConditionFormProps) {
 }
 
 const mockCreateCondition = vi.mocked(createCondition);
+const mockUpdateCondition = vi.mocked(updateCondition);
 const mockUseConditionsSearch = vi.mocked(useConditionsSearch);
 const mockUseConditions = vi.mocked(useConditions);
 const mockShowSnackbar = vi.mocked(showSnackbar);
@@ -55,7 +56,7 @@ const mockOpenmrsFetch = vi.mocked(openmrsFetch);
 vi.mock('./conditions.resource', async () => ({
   ...((await vi.importActual('./conditions.resource')) as object),
   createCondition: vi.fn(),
-  editCondition: vi.fn(),
+  updateCondition: vi.fn(),
   useConditions: vi.fn(),
   useConditionsSearch: vi.fn(),
 }));
@@ -75,6 +76,7 @@ mockUseConditionsSearch.mockReturnValue({
 });
 
 mockCreateCondition.mockResolvedValue({ status: 201, body: 'Condition created' } as unknown as FetchResponse);
+mockUpdateCondition.mockResolvedValue({ status: 200, body: 'Condition updated' } as unknown as FetchResponse);
 
 describe('Conditions form', () => {
   it('renders the conditions form with all the relevant fields and values', () => {
@@ -186,41 +188,6 @@ describe('Conditions form', () => {
     });
   });
 
-  it('renders an error notification if there was a problem recording a condition', async () => {
-    const user = userEvent.setup();
-
-    mockUseConditionsSearch.mockReturnValue({
-      searchResults: searchedCondition,
-      error: null,
-      isSearching: false,
-    });
-
-    renderConditionsForm();
-
-    const submitButton = screen.getByRole('button', { name: /save & close/i });
-    const activeStatusInput = screen.getByRole('radio', { name: 'Active' });
-    const conditionSearchInput = screen.getByRole('searchbox', { name: /enter condition/i });
-    const onsetDateInput = screen.getByRole('textbox', { name: /onset date/i });
-
-    const error = {
-      message: 'Internal Server Error',
-      response: {
-        status: 500,
-        statusText: 'Internal Server Error',
-      },
-    };
-
-    mockCreateCondition.mockRejectedValue(error);
-    await user.type(conditionSearchInput, 'Headache');
-    await user.click(screen.getByRole('button', { name: /Headache/i }));
-    await user.click(onsetDateInput);
-    await user.paste('2020-05-05');
-    await user.click(activeStatusInput);
-    expect(activeStatusInput).toBeChecked();
-    expect(submitButton).toBeEnabled();
-    await user.click(submitButton);
-  });
-
   it('validates the form against the provided zod schema before submitting it', async () => {
     const user = userEvent.setup();
 
@@ -305,6 +272,178 @@ describe('Conditions form', () => {
 
     await user.click(inactiveStatusInput);
     await user.click(submitButton);
+  });
+});
+
+describe.each(['creating', 'editing'] as const)('Condition save errors when %s', (formContext) => {
+  const isEditing = formContext === 'editing';
+  const saveCondition = isEditing ? mockUpdateCondition : mockCreateCondition;
+  const errorTitle = isEditing ? 'Error updating condition' : 'Error creating condition';
+  const fallback = 'Unable to save the condition. Please try again.';
+  const rawUrl = 'https://example.org/openmrs/ws/fhir2/R4/Condition?_summary=data';
+  const transportMessage =
+    `Server responded with 500 () for url ${rawUrl}. ` +
+    'Check err.responseBody or network tab in dev tools for more info';
+  const existingCondition = {
+    clinicalStatus: 'Active',
+    conceptId: '117399AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    display: 'Hypertension',
+    onsetDateTime: '2020-08-19T00:00:00+00:00',
+    recordedDate: '2020-08-19T18:34:48+00:00',
+    id: 'f4ee2cfe-3880-4ea2-a5a6-82aa8a0f6389',
+  };
+
+  beforeEach(() => {
+    mockCreateCondition.mockReset().mockResolvedValue({ status: 201 } as FetchResponse);
+    mockUpdateCondition.mockReset().mockResolvedValue({ status: 200 } as FetchResponse);
+    mockUseConditions.mockReturnValue({
+      conditions: isEditing ? [existingCondition] : [],
+      error: null,
+      isLoading: false,
+      isValidating: false,
+      mutate: vi.fn().mockResolvedValue(undefined),
+    });
+    mockUseConditionsSearch.mockReturnValue({
+      searchResults: searchedCondition,
+      error: null,
+      isSearching: false,
+    });
+  });
+
+  async function submitRejectedCondition(error: unknown) {
+    const user = userEvent.setup();
+    saveCondition.mockRejectedValueOnce(error);
+    renderConditionsForm({ formContext, condition: isEditing ? existingCondition : null });
+
+    if (!isEditing) {
+      await user.type(screen.getByRole('searchbox', { name: /enter condition/i }), 'Headache');
+      await user.click(screen.getByRole('button', { name: /headache/i }));
+      await user.click(screen.getByRole('textbox', { name: /onset date/i }));
+      await user.paste('2020-05-05');
+    }
+
+    const onsetDateInput = screen.getByRole('textbox', { name: /onset date/i }) as HTMLInputElement;
+    const onsetDateValue = onsetDateInput.value;
+    expect(onsetDateValue).not.toBe('');
+    const submitButton = screen.getByRole('button', { name: /save & close/i });
+    await user.click(submitButton);
+    const alert = await screen.findByRole('alert');
+
+    expect(saveCondition).toHaveBeenCalledTimes(1);
+    if (isEditing) {
+      expect(mockUpdateCondition).toHaveBeenCalledWith(existingCondition.id, expect.any(Object));
+      expect(mockCreateCondition).not.toHaveBeenCalled();
+    } else {
+      expect(mockUpdateCondition).not.toHaveBeenCalled();
+    }
+    expect(alert).toHaveTextContent(errorTitle);
+    expect(submitButton).toBeEnabled();
+    expect(defaultProps.closeWorkspace).not.toHaveBeenCalled();
+    expect(mockShowSnackbar).not.toHaveBeenCalled();
+
+    return { user, alert, submitButton, onsetDateValue };
+  }
+
+  function expectHumanMessage(alert: HTMLElement, message: string) {
+    expect(alert).toHaveTextContent(message);
+    expect(alert).not.toHaveTextContent(transportMessage);
+    expect(alert).not.toHaveTextContent(/https?:\/\/|\/ws\/fhir2\/|server responded with|dev tools/i);
+  }
+
+  it('shows the server reason instead of transport diagnostics for a failed save, including HTTP 500', async () => {
+    const message = isEditing
+      ? 'You do not have permission to update conditions.'
+      : 'You do not have permission to add conditions.';
+    const { alert } = await submitRejectedCondition({
+      message: transportMessage,
+      response: { status: 500, statusText: 'Internal Server Error' },
+      responseBody: { error: { message } },
+    });
+
+    expectHumanMessage(alert, message);
+  });
+
+  it.each([
+    ['missing body', undefined],
+    ['null body', null],
+    ['malformed body', 'Not JSON'],
+    ['missing error', {}],
+    ['missing message', { error: {} }],
+    ['empty message', { error: { message: '' } }],
+    ['blank message', { error: { message: '   ' } }],
+    ['non-string message', { error: { message: { detail: 'Not a message string' } } }],
+  ])('shows a friendly fallback for a %s', async (_description, responseBody) => {
+    const { alert } = await submitRejectedCondition({
+      message: transportMessage,
+      response: { status: 500 },
+      responseBody,
+    });
+
+    expectHumanMessage(alert, fallback);
+  });
+
+  it('shows a friendly fallback for a network failure', async () => {
+    const { alert } = await submitRejectedCondition(new TypeError('Failed to fetch'));
+
+    expectHumanMessage(alert, fallback);
+    expect(alert).not.toHaveTextContent('Failed to fetch');
+  });
+
+  it('uses a friendly fallback without exposing FHIR OperationOutcome diagnostics', async () => {
+    const { alert } = await submitRejectedCondition({
+      message: transportMessage,
+      responseBody: {
+        resourceType: 'OperationOutcome',
+        issue: [{ severity: 'error', code: 'forbidden', diagnostics: transportMessage }],
+      },
+    });
+
+    expectHumanMessage(alert, fallback);
+  });
+
+  it('renders the translated fallback', async () => {
+    const translationMock = useTranslation();
+    const originalTranslate = translationMock.t;
+    const translatedFallback = 'No se pudo guardar la condición. Inténtelo de nuevo.';
+    const tSpy = vi.spyOn(translationMock, 't').mockImplementation((...args) => {
+      if (args[1] === fallback) {
+        return translatedFallback;
+      }
+      return originalTranslate(...args);
+    });
+
+    try {
+      const { alert } = await submitRejectedCondition({ message: transportMessage });
+
+      expectHumanMessage(alert, translatedFallback);
+      expect(alert).not.toHaveTextContent(fallback);
+    } finally {
+      tSpy.mockRestore();
+    }
+  });
+
+  it('preserves form values after failure and allows a successful retry', async () => {
+    const { user, submitButton, onsetDateValue } = await submitRejectedCondition({ message: transportMessage });
+
+    expect(screen.getByRole('radio', { name: 'Active' })).toBeChecked();
+    expect(screen.getByRole('textbox', { name: /onset date/i })).toHaveDisplayValue(onsetDateValue);
+    if (isEditing) {
+      expect(screen.getByText(existingCondition.display)).toBeInTheDocument();
+    } else {
+      expect(screen.getByRole('searchbox', { name: /enter condition/i })).toHaveValue('Headache');
+    }
+
+    await user.click(submitButton);
+
+    await waitFor(() => {
+      expect(defaultProps.closeWorkspace).toHaveBeenCalledWith({ discardUnsavedChanges: true });
+    });
+    expect(saveCondition).toHaveBeenCalledTimes(2);
+    expect(mockShowSnackbar).toHaveBeenCalledWith({
+      kind: 'success',
+      subtitle: 'It is now visible on the Conditions page',
+      title: isEditing ? 'Condition updated' : 'Condition saved',
+    });
   });
 });
 

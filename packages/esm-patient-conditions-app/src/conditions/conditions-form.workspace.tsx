@@ -59,6 +59,13 @@ const ConditionsForm: React.FC<PatientWorkspace2DefinitionProps<ConditionFormPro
   const [errorUpdating, setErrorUpdating] = useState(null);
   const isEditing = formContext === 'editing';
 
+  const getErrorMessage = (error) => {
+    const message = error?.responseBody?.error?.message;
+    return typeof message === 'string' && message.trim()
+      ? message
+      : t('conditionSaveError', 'Unable to save the condition. Please try again.');
+  };
+
   const matchingCondition = conditions?.find((c) => c?.id === condition?.id);
 
   const schema = createSchema(formContext, t);
@@ -121,7 +128,7 @@ const ConditionsForm: React.FC<PatientWorkspace2DefinitionProps<ConditionFormPro
                   kind="error"
                   lowContrast
                   title={t('errorCreatingCondition', 'Error creating condition')}
-                  subtitle={errorCreating?.message}
+                  subtitle={getErrorMessage(errorCreating)}
                 />
               </div>
             ) : null}
@@ -133,7 +140,7 @@ const ConditionsForm: React.FC<PatientWorkspace2DefinitionProps<ConditionFormPro
                   kind="error"
                   lowContrast
                   title={t('errorUpdatingCondition', 'Error updating condition')}
-                  subtitle={errorUpdating?.message}
+                  subtitle={getErrorMessage(errorUpdating)}
                 />
               </div>
             ) : null}
